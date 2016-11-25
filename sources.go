@@ -1,12 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"github.com/klauspost/cpuid"
 	"io/ioutil"
 	"os/exec"
 	"path"
-
-	"github.com/klauspost/cpuid"
+	"strconv"
 )
 
 // FeatureSource represents a source of discovered node features.
@@ -98,5 +99,49 @@ func (s pstateSource) Discover() ([]string, error) {
 		features = append(features, "turbo")
 	}
 
+	return features, nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Network Source
+
+// Implements main.FeatureSource.
+type networkSource struct{}
+
+func (s networkSource) Name() string { return "netid" }
+func (s networkSource) Discover() ([]string, error) {
+	features := []string{}
+	var total_num_vfs int = 0
+	// sysfs of the node mounted as /hostsys inside the pod
+	netInterfaces, err := ioutil.ReadDir("/hostsys/class/net") //does not return . and ..
+	if err != nil {
+		return nil, fmt.Errorf("can't obtain the network interfaces: %s", err.Error())
+	}
+	for _, netInterface := range netInterfaces {
+		//forming the file name : /hostsys/class/net/<network interface>/device/sriov_numvfs
+		filename := "/hostsys/class/net/" + netInterface.Name() + "/device/sriov_numvfs"
+		bytes_received, err := ioutil.ReadFile(filename)
+		if err != nil {
+			// interface does not support SRIOV
+			continue // proceeding to next iteration for next network interface
+		}
+		//removing white spaces
+		num := bytes.TrimSpace(bytes_received)
+		//checking if 0 bytes read
+		if l := len(bytes_received); l == 0 {
+			// Zero bytes read for this file
+			continue // proceeding to next iteration for next network interface
+		}
+		//converting bytes to integer and checking for error
+		n, err := strconv.Atoi(string(num))
+		if err != nil {
+			// Receiving non-integral value
+			continue // proceeding to next iteration for next network interface
+		}
+		total_num_vfs += n
+	}
+	if total_num_vfs > 0 {
+		features = append(features, "SRIOV")
+	}
 	return features, nil
 }
