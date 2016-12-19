@@ -3,13 +3,14 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"github.com/klauspost/cpuid"
 	"io/ioutil"
 	"net"
 	"os/exec"
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/klauspost/cpuid"
 )
 
 // FeatureSource represents a source of discovered node features.
@@ -24,12 +25,6 @@ type FeatureSource interface {
 const (
 	// RDTBin is the path to RDT detection helpers.
 	RDTBin = "/go/src/github.com/kubernetes-incubator/node-feature-discovery/rdt-discovery"
-
-	// path to network interfaces in sysfs
-	pathNet = "/sys/class/net/"
-
-	// path suffix to obtain number of virtual functions for a network interface
-	deviceSriovNumvfs = "/device/sriov_numvfs"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -122,29 +117,47 @@ func (s networkSource) Name() string { return "network" }
 func (s networkSource) Discover() ([]string, error) {
 	features := []string{}
 	netInterfaces, err := net.Interfaces()
-
 	if err != nil {
-		return nil, fmt.Errorf("can't obtain the network interfaces from sysfs: %s", err.Error())
+		return nil, fmt.Errorf("can't obtain the network interfaces details: %s", err.Error())
 	}
 	// iterating through network interfaces to obtain their respective number of virtual functions
 	for _, netInterface := range netInterfaces {
-		if strings.Contains(netInterface.Flags.String(), "up") {
-			netInterfaceVfPath := pathNet + netInterface.Name + deviceSriovNumvfs
-			bytes_received, err := ioutil.ReadFile(netInterfaceVfPath)
+		if strings.Contains(netInterface.Flags.String(), "up") && !strings.Contains(netInterface.Flags.String(), "loopback") {
+			totalVfsPath := "/sys/class/net/" + netInterface.Name + "/device/sriov_totalvfs"
+			totalBytes, err := ioutil.ReadFile(totalVfsPath)
 			if err != nil {
-				stderrLogger.Printf("SR-IOV not supported for network interface: %s", netInterface.Name)
+				stderrLogger.Printf("SR-IOV not supported for network interface: %s: %s", netInterface.Name, err.Error())
 				continue
 			}
-			num := bytes.TrimSpace(bytes_received)
-			n, err := strconv.Atoi(string(num))
+			total := bytes.TrimSpace(totalBytes)
+			t, err := strconv.Atoi(string(total))
 			if err != nil {
-				stderrLogger.Printf("Error in obtaining the number of virtual functions for network interface: %s", netInterface.Name)
+				stderrLogger.Printf("Error in obtaining maximum supported number of virtual functions for network interface: %s: %s", netInterface.Name, err.Error())
 				continue
 			}
-			if n > 0 {
-				stdoutLogger.Printf("%d virtual functions configured on network interface: %s", n, netInterface.Name)
-				features = append(features, "SRIOV")
-				break
+			if t > 0 {
+				stdoutLogger.Printf("SR-IOV capability is detected on the network interface: %s", netInterface.Name)
+				stdoutLogger.Printf("%d maximum supported number of virtual functions on network interface: %s", t, netInterface.Name)
+				features = append(features, "sriov")
+				numVfsPath := "/sys/class/net/" + netInterface.Name + "/device/sriov_numvfs"
+				numBytes, err := ioutil.ReadFile(numVfsPath)
+				if err != nil {
+					stderrLogger.Printf("SR-IOV not configured for network interface: %s: %s", netInterface.Name, err.Error())
+					continue
+				}
+				num := bytes.TrimSpace(numBytes)
+				n, err := strconv.Atoi(string(num))
+				if err != nil {
+					stderrLogger.Printf("Error in obtaining the configured number of virtual functions for network interface: %s: %s", netInterface.Name, err.Error())
+					continue
+				}
+				if n > 0 {
+					stderrLogger.Printf("%d virtual functions configured on network interface: %s", n, netInterface.Name)
+					features = append(features, "sriov-configured")
+					break
+				} else if n == 0 {
+					stderrLogger.Printf("SR-IOV not configured on network interface: %s", netInterface.Name)
+				}
 			}
 		}
 	}
